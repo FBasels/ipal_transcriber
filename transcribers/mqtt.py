@@ -23,37 +23,28 @@ class MQTTTranscriber(Transcriber):
         14: Activity.COMMAND
     }
 
-    # dict mapping message identifier (key) to topic (value)
-    msg_topic = {}
+    # dict storing mqtt message identifier (key) and mapping them to topic (value)
+    _msg_topic = {}
+    # dict mapping ipal message id (key) to mqtt message identifier (value) for messages with QoS >= 1
+    _ipal_id_msg_id = {}
 
-    # TODO: implement
+    @classmethod
     def state_identifier(cls, msg, key):
-        # Used to identify a single variable for the state. Since e.g.
-        # in Modbus a specific coil.1 depends on the IP address and unitID,
-        # whereas in NMEA 0183 a GLL measurement does not necessarily
-        # depend on the source address.
-        # Default is source and variable name separated by ':'.
-
-        # INFO Same ip+port+key for different protocols unlikely
-        return "{}:{}".format(msg.src, key)
+        return key
 
     def matches_protocol(self, pkt):
-
         return "MQTT" in pkt
 
-    # TODO: add responds_to entry in IpalMessage
     def parse_packet(self, pkt):
         res = []
 
         src = "{}:{}".format(pkt["IP"].src, pkt["TCP"].srcport)
         dest = "{}:{}".format(pkt["IP"].dst, pkt["TCP"].dstport)
         mqtt_layer = pkt.get_multiple_layers("MQTT")
-        # print(mqtt_layer)
         for i in range(0, len(mqtt_layer)):
             mqtt = mqtt_layer[i]
-            type = int(mqtt.msgtype)
-            # print(mqtt.field_names)
-            # print(mqtt)
+            msg_type = int(mqtt.msgtype)
+
             msg_len = 2 + int(mqtt.len)
 
             m = IpalMessage(
@@ -63,25 +54,75 @@ class MQTTTranscriber(Transcriber):
                 timestamp=float(pkt.sniff_time.timestamp()),
                 protocol="mqtt",
                 length=msg_len,
-                type=type,
-                activity=self._msgtype_to_act_mapping[type]
+                type=msg_type,
+                activity=self._msgtype_to_act_mapping[msg_type]
             )
 
-            if type == 3:
-                # decode binary data to ascii
+            if msg_type == 3:     # PUBLISH
                 m.data = {mqtt.topic: bytes.fromhex(str(mqtt.msg).replace(':', '')).decode('ascii')}
-            elif type == 8:
+                if int(mqtt.qos) >= 1:
+                    self._msg_topic[mqtt.msgid] = mqtt.topic
+            elif msg_type in [4, 5, 6, 7]:  # PUBACK, PUBREC, PUBREL, PUBCOMP
+                self._ipal_id_msg_id[m.id] = mqtt.msgid
+            elif msg_type == 8:     # SUBSCRIBE
                 m.data = {mqtt.topic: None}
-                self.msg_topic[mqtt.msgid] = mqtt.topic
-            elif type == 9:
-                # maybe avoid pop if the entry in the dict is needed for linking messages
-                m.data = {self.msg_topic.pop(mqtt.msgid): None}
+                if int(mqtt.qos) >= 1:
+                    self._msg_topic[mqtt.msgid] = mqtt.topic
+                    self._ipal_id_msg_id[m.id] = mqtt.msgid
+            elif msg_type == 9:     # SUBACK
+                m.data = {self._msg_topic.pop(mqtt.msgid): None}
+                self._ipal_id_msg_id[m.id] = mqtt.msgid
+            elif msg_type == 10:    # UNSUBSCRIBE
+                # commented parts here because of the definition of the data field in the exercise. Could be combined with SUBSCRIBE
+                # m.data = {mqtt.topic: None}
+                if int(mqtt.qos) >= 1:
+                    # self.msg_topic[mqtt.msgid] = mqtt.topic
+                    self._ipal_id_msg_id[m.id] = mqtt.msgid
+            elif msg_type == 11:    # UNSUBACK
+                # commented parts here because of the definition of the data field in the exercise. Could be combined with SUBACK
+                # m.data = {self.msg_topic.pop(mqtt.msgid): None}
+                self._ipal_id_msg_id[m.id] = mqtt.msgid
+
+            if msg_type == 14:
+                # Packet type 14 is disconnect and will not trigger a response
+                pass
+            elif msg_type == 5:
+                # Packet type 5 is PUBREC. It will be responded by PUBREL and should be handled the same as a request
+                m._match_to_requests = True
+                m._add_to_request_queue = True
+            elif int(pkt["TCP"].dstport) == settings.MQTT_PORT or int(pkt["TCP"].dstport) == settings.MQTT_TLS_PORT:    # request
+                m._add_to_request_queue = True
+            elif int(pkt["TCP"].srcport) == settings.MQTT_PORT or int(pkt["TCP"].srcport) == settings.MQTT_TLS_PORT:    # response
+                m._match_to_requests = True
+            else:
+                settings.logger.info("src and dst port not mqtt standard")
 
             res.append(m)
 
         return res
 
-    # TODO: implement
     def match_response(self, requests, response):
-        # Modifies a response by information derived from the corresponding request(s). This method may alter the requests in the request array but not the request array! It may return a list of requests to delete from the queue
-        return []
+        rmv = []
+        if response.type in [4, 5, 6, 7, 9, 11]:   # cases for responses to requests with QoS >=1
+            if response.type == 5:    # special case for PUBREC due to packet type number
+                key = (response.dest, 3, self._ipal_id_msg_id[response.id])
+            else:
+                key = (response.dest, int(response.type) - 1, self._ipal_id_msg_id.pop(response.id))
+
+            for req in requests:
+                if (req.src, int(req.type), self._ipal_id_msg_id[req.id]) == key:
+                    response.responds_to.append(req.id)
+                    self._ipal_id_msg_id.pop(req.id)
+
+        else:   # cases for all other responses without mqtt message id
+            key = (response.dest, int(response.type) - 1)
+            for req in requests:
+                if (req.src, int(req.type)) == key:
+                    response.responds_to.append(req.id)
+                    rmv.append(req)
+                # special case when authentication is used. Connect ACK responds to both
+                elif req.src.split(":")[0] == response.dest.split(":")[0] and req.type == 15 and response.type == 2:
+                    response.responds_to.append(req.id)
+                    rmv.append(req)
+
+        return rmv

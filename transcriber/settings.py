@@ -6,6 +6,8 @@ compresslevel = 9  # 0 no compress, 1 large/fast, 9 small/slow
 # Pyshark options
 MBTCP_PORT = 502  # Default Modbus Port
 ENIP_PORT = 44818
+MQTT_PORT = 1883
+MQTT_TLS_PORT = 8883
 
 pyshark_options = [
     "-o",
@@ -25,7 +27,8 @@ protocols = []  # protocol names to transcribe
 rules = None
 rulesin = None  # path to rule file
 crc = "and"  # application, transport, and, or
-timeout = 0.250  # 250 ms
+# timeout = 0.250  # 250 ms
+timeout = 0.5  # 500 ms
 maliciousdefault = None
 malicious = None
 maliciousin = None
