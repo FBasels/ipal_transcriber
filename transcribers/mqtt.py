@@ -58,6 +58,7 @@ class MQTTTranscriber(Transcriber):
                 activity=self._msgtype_to_act_mapping[msg_type]
             )
 
+            # add data field and/or store mqtt message id
             if msg_type == 3:     # PUBLISH
                 m.data = {mqtt.topic: bytes.fromhex(str(mqtt.msg).replace(':', '')).decode('ascii')}
                 if int(mqtt.qos) >= 1:
@@ -73,18 +74,28 @@ class MQTTTranscriber(Transcriber):
                 m.data = {self._msg_topic.pop(mqtt.msgid): None}
                 self._ipal_id_msg_id[m.id] = mqtt.msgid
             elif msg_type == 10:    # UNSUBSCRIBE
-                # commented parts here because of the definition of the data field in the exercise. Could be combined with SUBSCRIBE
-                # m.data = {mqtt.topic: None}
                 if int(mqtt.qos) >= 1:
-                    # self.msg_topic[mqtt.msgid] = mqtt.topic
                     self._ipal_id_msg_id[m.id] = mqtt.msgid
             elif msg_type == 11:    # UNSUBACK
-                # commented parts here because of the definition of the data field in the exercise. Could be combined with SUBACK
-                # m.data = {self.msg_topic.pop(mqtt.msgid): None}
                 self._ipal_id_msg_id[m.id] = mqtt.msgid
 
+            #
+            # Alternative for UNSUBSCRIBE and UNSUBACK. Commented here, because of the definition of the data field in
+            # the exercise. However, it might make sense to add these information to the data field of the messages. In
+            # that case we could also combine these parts with the SUBSCRIBE and SUBACK part, since they are the same.
+            # elif msg_type == 10:    # UNSUBSCRIBE
+            #     m.data = {mqtt.topic: None}
+            #     if int(mqtt.qos) >= 1:
+            #         self.msg_topic[mqtt.msgid] = mqtt.topic
+            #         self._ipal_id_msg_id[m.id] = mqtt.msgid
+            # elif msg_type == 11:    # UNSUBACK
+            #     m.data = {self.msg_topic.pop(mqtt.msgid): None}
+            #     self._ipal_id_msg_id[m.id] = mqtt.msgid
+            #
+
+            # add response_to
             if msg_type == 14:
-                # Packet type 14 is disconnect and will not trigger a response
+                # Packet type 14 is disconnect and neither is nor will trigger a response
                 pass
             elif msg_type == 5:
                 # Packet type 5 is PUBREC. It will be responded by PUBREL and should be handled the same as a request
@@ -112,6 +123,7 @@ class MQTTTranscriber(Transcriber):
             for req in requests:
                 if (req.src, int(req.type), self._ipal_id_msg_id[req.id]) == key:
                     response.responds_to.append(req.id)
+                    rmv.append(req.id)
                     self._ipal_id_msg_id.pop(req.id)
 
         else:   # cases for all other responses without mqtt message id
